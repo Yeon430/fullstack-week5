@@ -9,57 +9,404 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Supabase CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body class="bg-white">
   <div id="root"></div>
 
   <script type="text/babel">
+    // Supabase 클라이언트 초기화
+    const supabaseUrl = 'https://aqhbhybwdtqruvjapdbs.supabase.co';
+    const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFxaGJoeWJ3ZHRxcnV2amFwZGJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjAzODM0MzQsImV4cCI6MjA3NTk1OTQzNH0.K0Ba-6Oj2VVHUbSUnAg7an8woa-hh2Ms8pcWPiTjx3w';
+    const supabase = window.supabase.createClient(supabaseUrl, supabaseKey);
+
+    // 인증 함수들
+    const signUp = async (email, password) => {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          emailRedirectTo: window.location.origin
+        }
+      });
+      return { data, error };
+    };
+
+    const signIn = async (email, password) => {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password
+      });
+      return { data, error };
+    };
+
+    const signOut = async () => {
+      const { error } = await supabase.auth.signOut();
+      return error;
+    };
+
+    const getCurrentUser = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      return user;
+    };
+
+    const resendConfirmation = async (email) => {
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email: email
+      });
+      return error;
+    };
+
     function TodoApp() {
       const [todos, setTodos] = React.useState([]);
       const [inputText, setInputText] = React.useState("");
       const [searchText, setSearchText] = React.useState("");
+      const [user, setUser] = React.useState(null);
+      const [showAuth, setShowAuth] = React.useState(false);
+      const [authMode, setAuthMode] = React.useState('login'); // 'login' or 'signup'
+      const [authEmail, setAuthEmail] = React.useState('');
+      const [authPassword, setAuthPassword] = React.useState('');
+      
+      // 🤖 AI 관련 State
+      const [aiInput, setAiInput] = React.useState(''); // AI에게 보낼 큰 작업
+      const [aiSteps, setAiSteps] = React.useState([]); // AI가 생성한 단계들
+      const [selectedSteps, setSelectedSteps] = React.useState([]); // 선택된 체크박스 (true/false 배열)
+      const [isAiLoading, setIsAiLoading] = React.useState(false); // 로딩 상태
+
+      // 🔐 인증 관련 함수들
+      const handleAuth = async (e) => {
+        e.preventDefault();
+        try {
+          if (authMode === 'signup') {
+            const { data, error } = await signUp(authEmail, authPassword);
+            if (error) throw error;
+            
+            if (data.user && !data.user.email_confirmed_at) {
+              alert('회원가입이 완료되었습니다! 이메일을 확인하고 링크를 클릭해주세요.\n이메일이 오지 않았다면 스팸함을 확인해주세요.');
+            } else {
+              alert('회원가입이 완료되었습니다!');
+            }
+            setAuthMode('login');
+            // 이메일은 유지해서 재전송 가능하게 함
+            setAuthPassword('');
+          } else {
+            const { data, error } = await signIn(authEmail, authPassword);
+            if (error) {
+              console.error('로그인 오류:', error);
+              if (error.message.includes('Invalid login credentials')) {
+                alert('이메일 또는 비밀번호가 잘못되었습니다.\n회원가입을 먼저 해주세요.');
+                setAuthMode('signup');
+              } else {
+                throw error;
+              }
+              return;
+            }
+            setUser(data.user);
+            setShowAuth(false);
+            setAuthEmail('');
+            setAuthPassword('');
+          }
+        } catch (error) {
+          console.error('인증 오류:', error);
+          alert(`오류: ${error.message}`);
+        }
+      };
+
+      const handleSignOut = async () => {
+        try {
+          await signOut();
+          setUser(null);
+          setTodos([]);
+        } catch (error) {
+          alert(`로그아웃 오류: ${error.message}`);
+        }
+      };
+
+      // 🤖 AI로 작업 분해하기
+      const handleAIBreakdown = async () => {
+        // 1️⃣ 로그인 확인
+        if (!user) {
+          alert("로그인이 필요합니다!");
+          setShowAuth(true);
+          return;
+        }
+
+        // 2️⃣ 입력 검증
+        if (!aiInput.trim()) {
+          alert("큰 작업을 입력해주세요!");
+          return;
+        }
+
+        try {
+          // 3️⃣ 로딩 시작
+          setIsAiLoading(true);
+          setAiSteps([]); // 이전 결과 초기화
+          setSelectedSteps([]);
+
+          // 4️⃣ Express 서버로 AI 요청
+          console.log('🤖 AI 요청:', aiInput);
+          const response = await fetch('http://localhost:3002/api/ai/generate', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              prompt: aiInput
+            })
+          });
+
+          const data = await response.json();
+          console.log('✅ AI 응답:', data);
+
+          // 5️⃣ 에러 처리
+          if (!data.success) {
+            throw new Error(data.error || 'AI 요청 실패');
+          }
+
+          // 6️⃣ 응답 파싱 (줄바꿈 기준으로 나누기)
+          const steps = data.text
+            .split('\n')                    // 줄바꿈으로 나누기
+            .map(line => line.trim())       // 앞뒤 공백 제거
+            .filter(line => line.length > 0) // 빈 줄 제거
+            .map(line => {
+              // 번호나 기호 제거 (예: "1. ", "- ", "• ")
+              return line.replace(/^[\d]+[\.\)\-\:\•\*]\s*/, '');
+            })
+            .filter(line => line.length > 3); // 너무 짧은 줄 제외
+
+          console.log('📋 파싱된 단계:', steps);
+
+          // 7️⃣ State 업데이트
+          setAiSteps(steps);
+          setSelectedSteps(steps.map(() => true)); // 기본적으로 모두 선택
+
+        } catch (error) {
+          console.error('❌ AI 에러:', error);
+          
+          // 사용자 친화적인 에러 메시지
+          let errorMessage = 'AI 요청 중 오류가 발생했습니다.';
+          if (error.message.includes('fetch')) {
+            errorMessage = 'Express 서버에 연결할 수 없습니다.\nbackend 폴더에서 "node server.js"를 실행해주세요.';
+          } else if (error.message.includes('API key')) {
+            errorMessage = 'API 키 오류입니다. .env 파일을 확인해주세요.';
+          }
+          
+          alert(errorMessage);
+        } finally {
+          // 8️⃣ 로딩 종료
+          setIsAiLoading(false);
+        }
+      };
+
+      // 🤖 선택한 단계를 Todo에 추가
+      const addSelectedStepsToTodos = async () => {
+        if (!user) {
+          alert("로그인이 필요합니다!");
+          return;
+        }
+
+        // 선택된 단계들만 필터링
+        const stepsToAdd = aiSteps.filter((step, index) => selectedSteps[index]);
+
+        if (stepsToAdd.length === 0) {
+          alert("추가할 단계를 선택해주세요!");
+          return;
+        }
+
+        try {
+          console.log('📝 추가할 단계들:', stepsToAdd);
+          console.log('👤 현재 사용자:', user);
+
+          // 한 번에 여러 개 추가 (배열로 전달)
+          const todosToInsert = stepsToAdd.map(step => ({
+            text: step,
+            completed: false,
+            user_id: user.id
+          }));
+
+          console.log('➕ Supabase에 추가 중:', todosToInsert);
+
+          const { data, error } = await supabase
+            .from('todos')
+            .insert(todosToInsert)
+            .select();
+
+          if (error) {
+            console.error('❌ Supabase 에러:', error);
+            console.error('에러 코드:', error.code);
+            console.error('에러 메시지:', error.message);
+            console.error('에러 상세:', error.details);
+            console.error('에러 힌트:', error.hint);
+            throw error;
+          }
+
+          console.log('✅ 추가 성공:', data);
+
+          // 추가된 항목들을 기존 todos에 추가 (새로고침 대신 효율적으로)
+          setTodos([...data, ...todos]);
+
+          // AI 섹션 초기화
+          setAiInput('');
+          setAiSteps([]);
+          setSelectedSteps([]);
+
+          alert(`${stepsToAdd.length}개의 할 일이 추가되었습니다! ✅`);
+        } catch (error) {
+          console.error('❌ 할 일 추가 실패:', error);
+          
+          // 더 구체적인 에러 메시지
+          let errorMessage = '할 일 추가에 실패했습니다.';
+          
+          if (error.message) {
+            errorMessage += `\n\n오류: ${error.message}`;
+          }
+          
+          if (error.code) {
+            errorMessage += `\n코드: ${error.code}`;
+          }
+          
+          if (error.hint) {
+            errorMessage += `\n\n💡 힌트: ${error.hint}`;
+          }
+          
+          if (error.details) {
+            errorMessage += `\n\n상세: ${error.details}`;
+          }
+          
+          alert(errorMessage);
+        }
+      };
+
+      // 🤖 체크박스 토글
+      const toggleStepSelection = (index) => {
+        const newSelected = [...selectedSteps];
+        newSelected[index] = !newSelected[index];
+        setSelectedSteps(newSelected);
+      };
 
       // ✅ 할 일 추가
       const addTodo = async () => {
+        if (!user) {
+          alert("로그인이 필요합니다!");
+          setShowAuth(true);
+          return;
+        }
+        
         if (!inputText.trim()) {
           alert("할 일을 입력하세요!");
           return;
         }
 
-        const response = await fetch("http://localhost:3000/api/todos", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: inputText })
-        });
+        try {
+          const { data, error } = await supabase
+            .from('todos')
+            .insert([{ 
+              text: inputText, 
+              completed: false,
+              user_id: user.id
+            }])
+            .select()
+            .single();
 
-        const created = await response.json();
-        setTodos([...todos, created]);
-        setInputText("");
+          if (error) {
+            console.error('Supabase 오류:', error);
+            throw error;
+          }
+          setTodos([...todos, data]);
+          setInputText("");
+        } catch (error) {
+          console.error('할 일 추가 실패:', error);
+          alert(`할 일 추가에 실패했습니다: ${error.message}`);
+        }
       };
 
       // ✅ 삭제
       const deleteTodo = async (id) => {
-        await fetch(`http://localhost:3000/api/todos/${id}`, { method: "DELETE" });
-        setTodos(todos.filter(todo => todo.id !== id));
+        try {
+          const { error } = await supabase
+            .from('todos')
+            .delete()
+            .eq('id', id);
+
+          if (error) throw error;
+          setTodos(todos.filter(todo => todo.id !== id));
+        } catch (error) {
+          console.error('할 일 삭제 실패:', error);
+          alert('할 일 삭제에 실패했습니다.');
+        }
       };
 
       // ✅ 완료 상태 토글
       const toggleTodo = async (id, completed) => {
-        const response = await fetch(`http://localhost:3000/api/todos/${id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ completed })
-        });
-        const updated = await response.json();
-        setTodos(todos.map(todo => (todo.id === id ? updated : todo)));
+        try {
+          const { data, error } = await supabase
+            .from('todos')
+            .update({ completed })
+            .eq('id', id)
+            .select()
+            .single();
+
+          if (error) throw error;
+          setTodos(todos.map(todo => (todo.id === id ? data : todo)));
+        } catch (error) {
+          console.error('할 일 업데이트 실패:', error);
+          alert('할 일 업데이트에 실패했습니다.');
+        }
       };
 
-      // ✅ 전체 목록 불러오기 (처음 한 번)
+      // ✅ 전체 목록 불러오기 (사용자별)
       React.useEffect(() => {
-        fetch("http://localhost:3000/api/todos")
-          .then(res => res.json())
-          .then(data => setTodos(data))
-          .catch(err => console.error("할 일 목록 불러오기 실패:", err));
+        const fetchTodos = async () => {
+          if (!user) {
+            setTodos([]);
+            return;
+          }
+
+          try {
+            const { data, error } = await supabase
+              .from('todos')
+              .select('*')
+              .eq('user_id', user.id)
+              .order('created_at', { ascending: false });
+
+            if (error) throw error;
+            setTodos(data || []);
+          } catch (error) {
+            console.error('할 일 목록 불러오기 실패:', error);
+          }
+        };
+
+        fetchTodos();
+      }, [user]);
+
+      // 🔐 사용자 인증 상태 확인
+      React.useEffect(() => {
+        const checkUser = async () => {
+          // URL에서 인증 토큰 확인
+          const hashParams = new URLSearchParams(window.location.hash.substring(1));
+          const accessToken = hashParams.get('access_token');
+          
+          if (accessToken) {
+            // 토큰이 있으면 세션 설정
+            const { data, error } = await supabase.auth.setSession({
+              access_token: accessToken,
+              refresh_token: hashParams.get('refresh_token')
+            });
+            
+            if (data.user) {
+              setUser(data.user);
+              // URL 정리
+              window.history.replaceState({}, document.title, window.location.pathname);
+            }
+          } else {
+            // 일반적인 사용자 확인
+            const currentUser = await getCurrentUser();
+            setUser(currentUser);
+          }
+        };
+        checkUser();
       }, []);
 
       // ✅ 통계 계산
@@ -86,12 +433,132 @@
         <div className="min-h-screen bg-gray-50">
           {/* 상단 네비게이션 */}
           <div className="bg-white border-b border-gray-100">
-            <div className="max-w-md mx-auto px-6 py-4">
+            <div className="max-w-md mx-auto px-6 py-4 flex justify-between items-center">
               <h1 className="text-xl font-semibold text-black">할 일</h1>
+              {user ? (
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-gray-600">{user.email}</span>
+                  <button
+                    onClick={handleSignOut}
+                    className="text-sm text-gray-500 hover:text-gray-700"
+                  >
+                    로그아웃
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setShowAuth(true)}
+                  className="text-sm bg-black text-white px-4 py-2 rounded-lg hover:bg-gray-800"
+                >
+                  로그인
+                </button>
+              )}
             </div>
           </div>
 
           <div className="max-w-md mx-auto px-6 py-8">
+            {/* AI 작업 분해 섹션 */}
+            <div className="mb-8 bg-white border border-gray-200 rounded-xl p-6 shadow-sm">
+              {/* 헤더 */}
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-black rounded-lg flex items-center justify-center">
+                    <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h2 className="text-base font-semibold text-black">AI Task Breakdown</h2>
+                    <p className="text-xs text-gray-500">작업을 단계별로 분해합니다</p>
+                  </div>
+                </div>
+              </div>
+              
+              {/* AI 입력 */}
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  작업 설명
+                </label>
+                <textarea
+                  value={aiInput}
+                  onChange={(e) => setAiInput(e.target.value)}
+                  placeholder="예: 프로젝트 발표 준비, 여행 계획 세우기"
+                  rows={3}
+                  disabled={isAiLoading}
+                  className="w-full px-4 py-3 bg-white border border-gray-200 rounded-lg text-sm placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent transition-all resize-none disabled:bg-gray-50 disabled:cursor-not-allowed"
+                />
+              </div>
+
+              {/* AI 분해 버튼 */}
+              <button
+                onClick={handleAIBreakdown}
+                disabled={!aiInput.trim() || isAiLoading}
+                className="w-full bg-black hover:bg-gray-800 text-white px-4 py-3 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                {isAiLoading ? (
+                  <>
+                    <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span>Processing...</span>
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                    <span>작업 분해하기</span>
+                  </>
+                )}
+              </button>
+
+              {/* AI 결과 표시 */}
+              {aiSteps.length > 0 && (
+                <div className="mt-6 pt-6 border-t border-gray-200">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-sm font-semibold text-black uppercase tracking-wide">
+                      Suggested Steps
+                    </h3>
+                    <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded">
+                      {aiSteps.length} items
+                    </span>
+                  </div>
+                  
+                  {/* 체크박스 리스트 */}
+                  <div className="space-y-2 mb-5">
+                    {aiSteps.map((step, index) => (
+                      <label key={index} className="flex items-start gap-3 p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer group">
+                        <input
+                          type="checkbox"
+                          checked={selectedSteps[index]}
+                          onChange={() => toggleStepSelection(index)}
+                          className="mt-0.5 w-4 h-4 text-black border-2 border-gray-300 rounded focus:ring-0 focus:ring-offset-0"
+                        />
+                        <span className="flex-1 text-sm text-gray-800 leading-relaxed">
+                          {step}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+
+                  {/* Todo에 추가 버튼 */}
+                  <button
+                    onClick={addSelectedStepsToTodos}
+                    disabled={!selectedSteps.some(s => s)}
+                    className="w-full bg-gray-900 hover:bg-black text-white px-4 py-3 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                    </svg>
+                    <span>
+                      Add to Todo List ({selectedSteps.filter(s => s).length})
+                    </span>
+                  </button>
+                </div>
+              )}
+            </div>
+
             {/* 입력 영역 */}
             <div className="mb-8">
               <div className="flex gap-3">
@@ -216,6 +683,83 @@
               </div>
             )}
           </div>
+
+          {/* 🔐 로그인/회원가입 모달 */}
+          {showAuth && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+              <div className="bg-white rounded-xl p-6 w-full max-w-sm mx-4">
+                <div className="flex justify-between items-center mb-6">
+                  <h2 className="text-xl font-semibold">
+                    {authMode === 'login' ? '로그인' : '회원가입'}
+                  </h2>
+                  <button
+                    onClick={() => setShowAuth(false)}
+                    className="text-gray-400 hover:text-gray-600"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <form onSubmit={handleAuth} className="space-y-4">
+                  <div>
+                    <input
+                      type="email"
+                      placeholder="이메일"
+                      value={authEmail}
+                      onChange={(e) => setAuthEmail(e.target.value)}
+                      className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-gray-300"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <input
+                      type="password"
+                      placeholder="비밀번호"
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-gray-300"
+                      required
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    className="w-full bg-black text-white py-3 rounded-xl font-medium hover:bg-gray-800"
+                  >
+                    {authMode === 'login' ? '로그인' : '회원가입'}
+                  </button>
+                </form>
+
+                <div className="mt-4 text-center space-y-2">
+                  <button
+                    onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}
+                    className="text-sm text-gray-600 hover:text-gray-800 block"
+                  >
+                    {authMode === 'login' 
+                      ? '계정이 없으신가요? 회원가입' 
+                      : '이미 계정이 있으신가요? 로그인'
+                    }
+                  </button>
+                  
+                  {authMode === 'login' && authEmail && (
+                    <button
+                      onClick={async () => {
+                        try {
+                          const error = await resendConfirmation(authEmail);
+                          if (error) throw error;
+                          alert('인증 이메일을 다시 보냈습니다! 이메일을 확인해주세요.');
+                        } catch (error) {
+                          alert(`이메일 재전송 실패: ${error.message}`);
+                        }
+                      }}
+                      className="text-sm text-blue-600 hover:text-blue-800 block"
+                    >
+                      인증 이메일 다시 보내기
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       );
     }

@@ -144,75 +144,192 @@ app.listen(PORT, () => {
 // 📦 패키지 불러오기
 const express = require('express');
 const cors = require('cors');
-const Database = require('better-sqlite3');
+const { createClient } = require('@supabase/supabase-js');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+const rateLimit = require('express-rate-limit');
+require('dotenv').config();
 
 // 🚀 서버 설정
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// 🧱 SQLite DB 연결 및 테이블 생성
-const db = new Database('database/todos.db');
-db.exec(`
-  CREATE TABLE IF NOT EXISTS todos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    text TEXT NOT NULL,
-    completed INTEGER DEFAULT 0
-  )
-`);
+// 🚨 Rate Limiter 설정 (AI API 남용 방지)
+const aiLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,  // 1분 (60초)
+  max: 10,                   // 1분에 최대 10번 요청 가능
+  message: { 
+    success: false, 
+    error: '너무 많은 요청을 보냈습니다. 1분 후에 다시 시도해주세요.' 
+  },
+  standardHeaders: true,     // Rate limit 정보를 헤더에 포함
+  legacyHeaders: false,      // X-RateLimit-* 헤더 비활성화
+});
+
+// 🔥 Supabase 클라이언트 초기화
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
+
+// 🤖 Gemini AI 클라이언트 초기화
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
 // ✅ [R] 전체 조회 (Read)
-app.get('/api/todos', (req, res) => {
-  const todos = db.prepare('SELECT * FROM todos').all();
-  const formatted = todos.map(t => ({
-    ...t,
-    completed: Boolean(t.completed),
-  }));
-  res.json(formatted);
+app.get('/api/todos', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('todos')
+      .select('*')
+      .order('created_at', { ascending: false });
+    
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    console.error('할 일 목록 조회 실패:', error);
+    res.status(500).json({ error: '서버 오류가 발생했습니다.' });
+  }
 });
 
 // ✅ [C] 새 할 일 추가 (Create)
-app.post('/api/todos', (req, res) => {
-  const { text } = req.body;
-  if (!text) return res.status(400).json({ error: 'text가 필요합니다.' });
+app.post('/api/todos', async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text) {
+      return res.status(400).json({ error: 'text가 필요합니다.' });
+    }
 
-  const stmt = db.prepare('INSERT INTO todos (text) VALUES (?)');
-  const result = stmt.run(text);
-  const newTodo = { id: result.lastInsertRowid, text, completed: false };
-  res.status(201).json(newTodo);
+    const { data, error } = await supabase
+      .from('todos')
+      .insert([{ text, completed: false }])
+      .select()
+      .single();
+    
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (error) {
+    console.error('할 일 추가 실패:', error);
+    res.status(500).json({ error: '서버 오류가 발생했습니다.' });
+  }
 });
 
 // ✅ [U] 할 일 수정 (Update)
-app.put('/api/todos/:id', (req, res) => {
-  const { id } = req.params;
-  const { completed } = req.body;
+app.put('/api/todos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { completed } = req.body;
 
-  db.prepare('UPDATE todos SET completed = ? WHERE id = ?')
-    .run(completed ? 1 : 0, id);
-
-  const updated = db.prepare('SELECT * FROM todos WHERE id = ?').get(id);
-  updated.completed = Boolean(updated.completed);
-  res.json(updated);
+    const { data, error } = await supabase
+      .from('todos')
+      .update({ completed })
+      .eq('id', id)
+      .select()
+      .single();
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    console.error('할 일 수정 실패:', error);
+    res.status(500).json({ error: '서버 오류가 발생했습니다.' });
+  }
 });
 
 // ✅ [D] 할 일 삭제 (Delete)
-app.delete('/api/todos/:id', (req, res) => {
-  const { id } = req.params;
-  db.prepare('DELETE FROM todos WHERE id = ?').run(id);
-  res.json({ message: '삭제 완료', id });
+app.delete('/api/todos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { error } = await supabase
+      .from('todos')
+      .delete()
+      .eq('id', id);
+    
+    if (error) throw error;
+    res.json({ message: '삭제 완료', id });
+  } catch (error) {
+    console.error('할 일 삭제 실패:', error);
+    res.status(500).json({ error: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// 🤖 [AI] Todo 분해 엔드포인트
+app.post('/api/ai/generate', aiLimiter, async (req, res) => {
+  try {
+    // 1️⃣ 클라이언트에서 보낸 데이터 받기
+    const { prompt } = req.body;
+    
+    // 2️⃣ 입력 검증
+    if (!prompt || prompt.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: '작업 내용을 입력해주세요.'
+      });
+    }
+
+    // 3️⃣ AI에게 보낼 프롬프트 만들기
+    const systemPrompt = `당신은 큰 작업을 작은 단계로 나누는 전문가입니다.
+
+사용자가 입력한 작업을 3-5개의 구체적이고 실행 가능한 작은 단계로 나누세요.
+
+규칙:
+- 각 단계는 한 줄로 작성
+- 실행 가능한 동사로 시작 (예: "~하기", "~예약하기", "~준비하기")
+- 3개에서 5개 사이의 단계로만 작성
+- 각 줄은 단계 내용만 작성 (번호나 기호 없이)
+- 구체적이고 실행 가능한 단계여야 함
+
+작업: "${prompt}"
+
+응답 형식 예시:
+항공권 예매하기
+숙소 예약하기
+환전하기
+짐 챙기기`;
+
+    // 4️⃣ Gemini API 호출
+    console.log('🤖 AI 요청 시작:', prompt);
+    const result = await model.generateContent(systemPrompt);
+    const response = await result.response;
+    const text = response.text();
+    
+    console.log('✅ AI 응답:', text);
+
+    // 5️⃣ 성공 응답
+    res.json({
+      success: true,
+      text: text.trim(),
+      originalPrompt: prompt
+    });
+
+  } catch (error) {
+    // 6️⃣ 에러 처리
+    console.error('❌ AI 생성 오류:', error);
+    
+    // API 키 오류인지 확인
+    if (error.message && error.message.includes('API key')) {
+      return res.status(401).json({
+        success: false,
+        error: 'API 키가 유효하지 않습니다. .env 파일을 확인해주세요.'
+      });
+    }
+    
+    // 일반적인 에러
+    res.status(500).json({
+      success: false,
+      error: 'AI 요청 처리 중 오류가 발생했습니다.'
+    });
+  }
 });
 
 // 🚀 서버 실행
 app.listen(PORT, () => {
   console.log('='.repeat(50));
   console.log(`🚀 서버가 http://localhost:${PORT} 에서 실행 중!`);
+  console.log(`🤖 AI 엔드포인트: http://localhost:${PORT}/api/ai/generate`);
   console.log('='.repeat(50));
 });
-
-
-
-
 
 
 // ============================================
@@ -248,42 +365,3 @@ app.get('/api/hello/:name', (req, res) => {
 });
 */
 
-// ============================================
-// 서버 시작
-// ============================================
-
-app.listen(PORT, () => {
-  console.log('='.repeat(50));
-  console.log(`🚀 서버가 http://localhost:${PORT} 에서 실행 중!`);
-  console.log('='.repeat(50));
-  console.log('\n📝 TODO를 완성하고 테스트해보세요:');
-  console.log(`   1. http://localhost:${PORT}/`);
-  console.log(`   2. http://localhost:${PORT}/api/hello`);
-  console.log(`   3. http://localhost:${PORT}/api/time`);
-  console.log(`   4. http://localhost:${PORT}/api/hello/철수`);
-  console.log('\n종료: Ctrl + C\n');
-  console.log('='.repeat(50));
-});
-
-/**
- * 🎯 학습 포인트
- *
- * 1. app.get(경로, 콜백함수)
- *    - 첫 번째 파라미터: URL 경로
- *    - 두 번째 파라미터: 요청이 들어왔을 때 실행할 함수
- *
- * 2. res.json(객체)
- *    - JavaScript 객체를 JSON으로 변환해서 응답
- *    - 자동으로 Content-Type: application/json 설정
- *
- * 3. req.params
- *    - URL 파라미터 접근
- *    - /api/hello/:name → req.params.name
- *
- * 4. 실행 방법
- *    - node hands_on_simple_api.js
- *    - 브라우저에서 http://localhost:3000 접속
- *
- * 💡 팁: 코드를 수정하면 서버를 재시작해야 합니다!
- *       (Ctrl + C로 종료 → node hands_on_simple_api.js로 재실행)
- */
